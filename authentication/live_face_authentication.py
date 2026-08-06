@@ -1,27 +1,17 @@
 """
 live_face_authentication.py
 
-Microservice 2 - Face Detection and Tracking (live video), merged
-with manual authentication triggering.
+Microservice 2 - Face Detection and Tracking (live video), with
+manual authentication triggering and multithreaded authentication
+so the camera window never freezes while waiting on the embedding
+generation + API call.
 
-Continuously tracks a face in the live webcam feed using YuNet
-(OpenCV's lightweight ONNX face detector) — fast enough to run every
-frame, drawing a green bounding box with no wasted API calls.
-
-Once a face is boxed, the screen shows "Press Space to detect". Only
-when Space is pressed (with a face currently boxed) does the full
-authentication flow run:
-  1. The frame freezes, showing "Processing...".
-  2. A 512D embedding is generated using RetinaFace + FaceNet512
-     (live_embedding_pipeline.py) — keeps compatibility with the
-     existing database.
-  3. The embedding is sent to authentication_api.py's /authenticate
-     endpoint.
-  4. Result is shown in green ("Person: X is Authenticated") or red
-     ("Person: X is not Authenticated / Try Again") for a short delay.
-  5. Successful authentications are logged via log.py; both outcomes
-     are logged via test_logger.py.
-  6. Tracking then resumes automatically.
+Continuously tracks a face using YuNet (fast, runs every frame).
+Once boxed, the screen shows "Press Space to detect". On Space press,
+the authentication flow (RetinaFace + FaceNet512 embedding, then API
+call) runs in a BACKGROUND THREAD, while the main loop keeps reading
+frames and calling cv2.waitKey() — keeping the window responsive.
+Results are handed back to the main thread via a thread-safe queue.
 
 Press 'q' to quit at any time.
 """
@@ -29,6 +19,8 @@ Press 'q' to quit at any time.
 import os
 import sys
 import time
+import threading
+import queue
 
 import cv2
 import requests
@@ -56,15 +48,11 @@ YUNET_SCORE_THRESHOLD = 0.65
 YUNET_NMS_THRESHOLD = 0.30
 YUNET_TOP_K = 5000
 
-RESULT_DISPLAY_SECONDS = 3
+RESULT_DISPLAY_SECONDS = 1
 WINDOW_NAME = "Face Recognition and Authentication"
 BOX_COLOR_GREEN = (0, 210, 80)
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
-
-# --------------------------------------------------------------------- #
-# Lightweight face detector (YuNet) — used every frame for the live box
-# --------------------------------------------------------------------- #
 
 class YuNetFaceDetector:
     """Detects the single most confident face in a frame using YuNet."""
@@ -86,10 +74,6 @@ class YuNetFaceDetector:
         )
 
     def detect_best_face_box(self, frame):
-        """
-        Returns (x1, y1, x2, y2) of the highest-confidence face, or
-        None if no face is detected.
-        """
         height, width = frame.shape[:2]
         self.detector.setInputSize((width, height))
         _, faces = self.detector.detect(frame)
@@ -102,10 +86,6 @@ class YuNetFaceDetector:
         return (x, y, x + w, y + h)
 
 
-# --------------------------------------------------------------------- #
-# Authentication API client
-# --------------------------------------------------------------------- #
-
 class AuthenticationApiClient:
     def __init__(self, url: str = AUTHENTICATE_URL):
         self.url = url
@@ -115,10 +95,6 @@ class AuthenticationApiClient:
         response.raise_for_status()
         return response.json()
 
-
-# --------------------------------------------------------------------- #
-# Overlay helpers
-# --------------------------------------------------------------------- #
 
 class ScreenOverlay:
     @staticmethod
@@ -151,15 +127,12 @@ class ScreenOverlay:
         return overlay_frame
 
 
-# --------------------------------------------------------------------- #
-# Main application
-# --------------------------------------------------------------------- #
-
 class LiveAuthenticationApp:
     """
-    Tracks a face continuously with a green box (YuNet, fast). Once
-    boxed, prompts "Press Space to detect". Authentication (RetinaFace
-    + FaceNet512 + API call) only runs on Space press.
+    Tracks a face continuously with a green box (YuNet, fast, runs
+    every frame on the main thread). Authentication (RetinaFace +
+    FaceNet512 + API call) runs in a background thread on Space press,
+    so the camera feed never freezes while waiting on it.
     """
 
     def __init__(self):
@@ -171,12 +144,19 @@ class LiveAuthenticationApp:
         self.video_capture = cv2.VideoCapture(0)
         self.current_face_box = None
 
+        # Threading / synchronization
+        self.result_queue = queue.Queue()   # thread-safe hand-off, no manual lock needed
+        self.is_processing = False
+
     def run(self) -> None:
         if not self.video_capture.isOpened():
             raise RuntimeError("Could not open webcam.")
 
         print("[INFO] Live face authentication started.")
         print("[INFO] Press SPACE to authenticate the boxed face. Press 'q' to quit.")
+
+        result_display_until = 0.0
+        last_result_frame = None
 
         try:
             while True:
@@ -185,20 +165,32 @@ class LiveAuthenticationApp:
                     print("[WARNING] Failed to read frame from camera.")
                     continue
 
-                self.current_face_box = self.face_detector.detect_best_face_box(frame)
+                # Check if a background authentication attempt just finished
+                try:
+                    result_payload = self.result_queue.get_nowait()
+                    self.is_processing = False
+                    last_result_frame = result_payload["frame_for_display"]
+                    result_display_until = time.time() + RESULT_DISPLAY_SECONDS
+                except queue.Empty:
+                    pass
 
-                display_frame = frame.copy()
-                if self.current_face_box is not None:
-                    display_frame = ScreenOverlay.draw_tracking_box(display_frame, self.current_face_box)
-
-                cv2.imshow(WINDOW_NAME, display_frame)
+                if last_result_frame is not None and time.time() < result_display_until:
+                    cv2.imshow(WINDOW_NAME, last_result_frame)
+                elif self.is_processing:
+                    cv2.imshow(WINDOW_NAME, ScreenOverlay.draw_processing_screen(frame))
+                else:
+                    self.current_face_box = self.face_detector.detect_best_face_box(frame)
+                    display_frame = frame.copy()
+                    if self.current_face_box is not None:
+                        display_frame = ScreenOverlay.draw_tracking_box(display_frame, self.current_face_box)
+                    cv2.imshow(WINDOW_NAME, display_frame)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     break
-                elif key == ord(" "):
+                elif key == ord(" ") and not self.is_processing:
                     if self.current_face_box is not None:
-                        self._authenticate_current_frame(frame)
+                        self._trigger_authentication_async(frame)
                     else:
                         print("[INFO] Space pressed, but no face is currently boxed. Ignored.")
 
@@ -206,11 +198,14 @@ class LiveAuthenticationApp:
             self.video_capture.release()
             cv2.destroyAllWindows()
 
-    def _authenticate_current_frame(self, frame) -> None:
-        processing_frame = ScreenOverlay.draw_processing_screen(frame)
-        cv2.imshow(WINDOW_NAME, processing_frame)
-        cv2.waitKey(1)
+    def _trigger_authentication_async(self, frame) -> None:
+        """Starts authentication in a background thread; UI keeps running."""
+        self.is_processing = True
+        worker_thread = threading.Thread(target=self._authenticate_in_background, args=(frame,), daemon=True)
+        worker_thread.start()
 
+    def _authenticate_in_background(self, frame) -> None:
+        """Runs on a background thread. Never touches cv2 window calls directly."""
         try:
             embedding = self.embedding_generator.generate_embedding(frame)
             result = self.api_client.authenticate(embedding)
@@ -234,14 +229,8 @@ class LiveAuthenticationApp:
             self.test_logger.log_unsuccessful_attempt(distance=None)
             result_frame = ScreenOverlay.draw_not_authenticated_screen(frame)
 
-        self._show_result_for_delay(result_frame)
-
-    def _show_result_for_delay(self, result_frame, delay_seconds: int = RESULT_DISPLAY_SECONDS) -> None:
-        end_time = time.time() + delay_seconds
-        while time.time() < end_time:
-            cv2.imshow(WINDOW_NAME, result_frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+        # queue.Queue.put() is thread-safe — safe hand-off back to the main thread
+        self.result_queue.put({"frame_for_display": result_frame})
 
 
 def main():

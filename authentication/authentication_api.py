@@ -1,12 +1,16 @@
 """
 authentication_api.py
 
-Microservice 3 - Face Authentication.
+Microservice 3 - Face Authentication (async version).
 
 Exposes a FastAPI endpoint that receives a 512D face embedding,
 searches identity_embedding_table for the closest match using
 pgvector cosine distance, and returns whether authentication was
 Successful or Unsuccessful along with the matched person's name.
+
+Uses an async SQLAlchemy engine (asyncpg driver) so the API can
+handle multiple concurrent authentication requests without one
+request blocking another on database I/O.
 """
 
 import os
@@ -15,7 +19,8 @@ from typing import List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from pydantic import BaseModel, field_validator
-from sqlalchemy import URL, create_engine, MetaData, Table, Column, Integer, String, select
+from sqlalchemy import URL, MetaData, Table, Column, Integer, String, select
+from sqlalchemy.ext.asyncio import create_async_engine
 from pgvector.sqlalchemy import Vector
 
 _CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,10 +33,6 @@ STATUS_SUCCESSFUL = "Successful"
 STATUS_UNSUCCESSFUL = "Unsuccessful"
 
 
-# --------------------------------------------------------------------- #
-# Database setup
-# --------------------------------------------------------------------- #
-
 class DatabaseConfig:
     def __init__(self):
         self.host = os.getenv("DB_HOST", "localhost")
@@ -42,7 +43,7 @@ class DatabaseConfig:
 
     def build_connection_url(self):
         return URL.create(
-            drivername="postgresql+psycopg2",
+            drivername="postgresql+asyncpg",   # was postgresql+psycopg2
             username=self.username,
             password=self.password,
             host=self.host,
@@ -51,7 +52,7 @@ class DatabaseConfig:
         )
 
 
-_engine = create_engine(DatabaseConfig().build_connection_url(), echo=False)
+_engine = create_async_engine(DatabaseConfig().build_connection_url(), echo=False)
 _metadata = MetaData()
 
 identity_embedding_table = Table(
@@ -63,18 +64,12 @@ identity_embedding_table = Table(
 )
 
 
-# --------------------------------------------------------------------- #
-# Face matching service
-# --------------------------------------------------------------------- #
-
 class FaceMatchService:
-    """Finds the closest registered person to a given embedding."""
-
     def __init__(self, engine, distance_threshold: float = DISTANCE_THRESHOLD):
         self.engine = engine
         self.distance_threshold = distance_threshold
 
-    def find_best_match(self, query_embedding: list) -> Optional[dict]:
+    async def find_best_match(self, query_embedding: list) -> Optional[dict]:
         distance_column = identity_embedding_table.c.facial_data.cosine_distance(query_embedding).label("distance")
 
         statement = (
@@ -87,8 +82,9 @@ class FaceMatchService:
             .limit(1)
         )
 
-        with self.engine.connect() as connection:
-            best_row = connection.execute(statement).fetchone()
+        async with self.engine.connect() as connection:
+            result = await connection.execute(statement)
+            best_row = result.fetchone()
 
         if best_row is None or best_row.distance > self.distance_threshold:
             return None
@@ -103,10 +99,6 @@ class FaceMatchService:
 face_match_service = FaceMatchService(_engine)
 
 
-# --------------------------------------------------------------------- #
-# Request / Response models
-# --------------------------------------------------------------------- #
-
 class FaceEmbeddingRequest(BaseModel):
     embedding: List[float]
 
@@ -120,22 +112,18 @@ class FaceEmbeddingRequest(BaseModel):
 
 class AuthenticationResponse(BaseModel):
     status: str
-    person_unique_id: Optional[int] = None 
+    person_unique_id: Optional[int] = None
     person_name: Optional[str] = None
     distance: Optional[float] = None
     message: str
 
 
-# --------------------------------------------------------------------- #
-# FastAPI app
-# --------------------------------------------------------------------- #
-
 app = FastAPI(title="Face Authentication API")
 
 
 @app.post("/authenticate", response_model=AuthenticationResponse)
-def authenticate_face(request: FaceEmbeddingRequest) -> AuthenticationResponse:
-    match = face_match_service.find_best_match(request.embedding)
+async def authenticate_face(request: FaceEmbeddingRequest) -> AuthenticationResponse:
+    match = await face_match_service.find_best_match(request.embedding)
 
     if match is None:
         return AuthenticationResponse(
@@ -153,5 +141,14 @@ def authenticate_face(request: FaceEmbeddingRequest) -> AuthenticationResponse:
 
 
 @app.get("/health")
-def health_check() -> dict:
+async def health_check() -> dict:
     return {"status": "ok"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    API_HOST = os.getenv("API_HOST", "127.0.0.1")
+    API_PORT = int(os.getenv("API_PORT", "8000"))
+
+    uvicorn.run(app, host=API_HOST, port=API_PORT)

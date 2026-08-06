@@ -16,10 +16,10 @@ import os
 import json
 import time
 import uuid
+import threading
 from datetime import datetime, timezone
 
 from PIL import Image
-
 
 EMBEDDING_DIR = os.path.dirname(os.path.abspath(__file__))
 TRACING_DIR = os.path.join(EMBEDDING_DIR, "tracing")
@@ -67,9 +67,10 @@ class EmbeddingTracer:
     embedding/tracing/tracing.json.
     """
 
-    def __init__(self, tracing_file_path: str = TRACING_FILE_PATH):
+    def __init__(self, tracing_file_path: str = TRACING_FILE_PATH, lock: threading.Lock = None):
         self.tracing_file_path = tracing_file_path
         os.makedirs(os.path.dirname(self.tracing_file_path), exist_ok=True)
+        self.lock = lock   # optional external lock for thread-safe writes
 
         self.run_id = None
         self.image_path = None
@@ -129,9 +130,15 @@ class EmbeddingTracer:
         }
 
     def _persist_run(self) -> None:
+        if self.lock is not None:
+            with self.lock:
+                self._write_run_record()
+        else:
+            self._write_run_record()
+
+    def _write_run_record(self) -> None:
         existing_runs = self._load_existing_runs()
         existing_runs.append(self._build_run_record())
-
         with open(self.tracing_file_path, "w") as tracing_file:
             json.dump(existing_runs, tracing_file, indent=4)
 
