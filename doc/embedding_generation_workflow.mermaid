@@ -1,0 +1,14 @@
+flowchart TD
+    A["Input Image (.png)\ne.g. images/Dinkar.png"] --> B["weights_loading.py\nConfigure DEEPFACE_HOME\n→ use local /models weights"]
+    B --> C["embedding_tracing.py\nstart_run() + start_step()"]
+    C --> D["Step 1: RetinaFace\nDetect & Align Face"]
+    D --> E["Step 2: FaceNet512\nGenerate 512D Embedding"]
+    E --> F["Step 3: VectorStoreWriter\nBuild JSON record\n(file_path, file_name, file_name_vector)"]
+    F --> G["Save to vector_store/\n<image_name>.json"]
+    G --> H["embedding_tracing.py\nend_step() + end_run()"]
+    H --> I["Save run record to\nembedding/tracing/tracing.json"]
+    I --> J["[SUCCESS] Embedding saved"]
+
+    D -. on failure .-> X["[ERROR] No face detected /\nFile not found"]
+    E -. on failure .-> X
+    X --> H
