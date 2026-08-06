@@ -17,6 +17,7 @@ pydantic
 sqlalchemy
 psycopg2-binary
 pgvector
+asyncpg
 
 # ---- Utilities ----
 python-dotenv
