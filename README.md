@@ -19,9 +19,9 @@ recognized afterward.
 1. **Registration** — You place a photo of each person in a folder. The system looks at
    each photo, learns the person's face, and saves that information to a database.
 2. **Live Camera Detection** — A webcam window opens and continuously watches for a
-   face.
-3. **Authentication** — When a face is detected, the system checks it against everyone
-   who's been registered.
+   face, drawing a green box around it once found.
+3. **Authentication** — Pressing the **Space bar** checks the boxed face against
+   everyone who's been registered.
    - ✅ If it recognizes the person, it shows their name in green:
      *"Person: [Name] is Authenticated."*
    - ❌ If it doesn't recognize them, it shows a message in red asking them to try
@@ -55,8 +55,7 @@ pip install -r requirements.txt
 
 ```bash
 cd models
-python facenet512_model_download.py
-python retinaface_model_download.py
+python download_all_models.py
 cd ..
 ```
 
@@ -102,8 +101,8 @@ cd authentication
 python live_face_authentication.py
 ```
 
-A camera window will open. Show your face to the camera, and the system will tell you
-whether it recognizes you.
+A camera window will open and draw a green box around any face it sees. Press
+**Space** to check that face against the registered people.
 
 To stop, press **`q`** while the camera window is active.
 
@@ -130,4 +129,50 @@ python metric.py
 | `models` | The AI models used to recognize faces |
 | `embedding` | Tools that teach the system new faces |
 | `authentication` | The live camera and recognition service |
+| `database_admin` | A tool to add, view, update, or remove people from the database |
 | `vector_store` | Saved face data generated during registration |
+
+---
+
+## Version History
+
+### Version 1 — Original Working System
+
+The first complete version of the project. Everything ran one step at a time:
+
+- Registering a person's photo, checking the camera for a face, and asking the
+  recognition service for a match all happened one after another, waiting for each
+  step to finish before starting the next.
+- Registering a large batch of people took a while, since each person was processed
+  one by one.
+- The camera window would briefly freeze while waiting for a recognition result.
+- Downloading the three AI models happened one at a time.
+
+This version worked reliably, but had some natural slowness built in from doing
+everything sequentially.
+
+### Version 2 — Performance Improvements (Current)
+
+The same features as Version 1, but reworked so independent tasks can happen **at the
+same time** instead of waiting in line:
+
+- **Faster bulk registration** — When registering many people at once, several
+  people's photos are now processed simultaneously instead of one at a time.
+- **Smoother live camera** — The camera window no longer freezes while checking a
+  face. It stays smooth and responsive even while a recognition result is being
+  fetched in the background.
+- **Faster model setup** — All three AI models now download at the same time instead
+  of one after another.
+- **A more efficient recognition service** — The service that matches faces against
+  the database was upgraded to handle multiple requests more efficiently.
+
+**Files changed for Version 2:**
+- `authentication/authentication_api.py`
+- `authentication/live_face_authentication.py`
+- `embedding/embedding_tracing.py`
+- `embedding/all_embedding_generation.py`
+- `models/download_all_models.py` *(new file)*
+
+No steps to run the project changed between versions — everything in the
+[How to Run](#how-to-run-the-project) section above applies to the current
+(Version 2) codebase.
