@@ -1,0 +1,23 @@
+# ---- Deep learning / face recognition ----
+tensorflow>=2.16          # this project was tested with tensorflow 2.21; see README performance notes for GPU (tensorflow==2.10.*) alternative
+tf-keras                  # required by deepface/retina-face when using tensorflow >= 2.16 (Keras 3)
+deepface
+retina-face
+
+# ---- Computer vision / video ----
+opencv-python
+pillow
+
+# ---- Web framework (authentication API) ----
+fastapi
+uvicorn
+pydantic
+
+# ---- Database ----
+sqlalchemy
+psycopg2-binary
+pgvector
+
+# ---- Utilities ----
+python-dotenv
+requests
